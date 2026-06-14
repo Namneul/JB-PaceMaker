@@ -220,6 +220,11 @@ const state = {
   removedMems: [],
   consultationBrief: null,
   cashflowStabilityReport: null,
+  customGoal: null,
+  customGoalTitle: "",
+  savedGoals: [],
+  activeGoalId: "starter-default",
+  pendingDetailGoal: null,
   // 명세 6.14 데이터 통제권 토글 상태
   dataCtrl: {
     account:    true,   // 계좌 거래내역 분석
@@ -371,7 +376,6 @@ function bindEvents() {
     if (el) el.addEventListener("input", calcSimple);
   });
   calcSimple();
-  $("regSimpleBtn").addEventListener("click", () => toast("목표가 등록되었습니다!"));
 
   // Detail — additive inputs
   const getDetailPlaceholder = index => {
@@ -398,7 +402,6 @@ function bindEvents() {
 
   // AI 목표 분석
   $("analyzeBtn").addEventListener("click", handleAnalysis);
-
   // Skip question
   $("skipQBtn").addEventListener("click", () => toast("다음에 다시 확인할게요."));
 
@@ -424,9 +427,23 @@ function bindEvents() {
   });
 
   document.addEventListener("click", e => {
+    if (e.target.closest("#regSimpleBtn")) registerSimpleGoal();
+    if (e.target.closest("#regDetailBtn")) registerDetailGoal();
     const item = e.target.closest(".fin-guide-item[data-product-id]");
     if (item) openProductDetail(item.dataset.productId);
   });
+
+  const goalSelector = $("goalSelector");
+  if (goalSelector) {
+    goalSelector.addEventListener("change", e => {
+      state.activeGoalId = e.target.value || getDefaultGoalId();
+      state.consultationBrief = null;
+      state.cashflowStabilityReport = null;
+      saveState();
+      renderAll();
+      toast("선택한 목표 흐름을 불러왔습니다.");
+    });
+  }
 
   document.addEventListener("click", e => {
     if (e.target.closest("[data-product-page]")) {
@@ -604,8 +621,16 @@ async function handleAnalysis() {
   try {
     const parsed      = await parseGoal(combined);
     const p           = getProfile();
+    const fallbackDate = addMonths(new Date(), 36);
+    state.pendingDetailGoal = {
+      title: getGoalLabel(parsed.goalType, parsed.goalName),
+      goalType: parsed.goalType || '기타',
+      targetAmount: parsed.targetAmount || 0,
+      currentAmount: 0,
+      targetDate: parsed.targetDate || formatYearMonth(fallbackDate),
+    };
     const feasibility = calculateGoalFeasibility(
-      { targetAmount: parsed.targetAmount, currentAmount: 0, targetDate: parsed.targetDate },
+      state.pendingDetailGoal,
       p.metrics.income, p.metrics.expense,
     );
 
@@ -625,6 +650,8 @@ async function handleAnalysis() {
       상태: ${statusLabel}
       ${feasibility.shortfall > 0 ? `<br>월 부족액: ${fmtWon(feasibility.shortfall)}` : ''}
     `;
+    const regDetailBtn = $("regDetailBtn");
+    if (regDetailBtn) regDetailBtn.disabled = !state.pendingDetailGoal.targetAmount;
     if (parsed.isError) $("aiCalc").innerHTML += `<br><small style="color:var(--amber)">⚠ AI 응답 실패, 정규식 기반 추출 결과입니다.</small>`;
   } catch (err) {
     $("aiLoading").style.display = "none";
@@ -634,9 +661,41 @@ async function handleAnalysis() {
 }
 
 // ── Helpers ──
-function getProfile() { return profiles[state.profile] || profiles.starter; }
+function getProfile() {
+  const base = profiles[state.profile] || profiles.starter;
+  const active = getActiveGoalEntry();
+  if (!active || active.isDefault) return base;
+  return {
+    ...base,
+    goal: { ...base.goal, ...active.goal },
+  };
+}
 function fmtWon(v)    { return `${Math.round(v).toLocaleString("ko-KR")}원`; }
 function fmtShort(v)  { return Math.abs(v) >= 10000 ? `${Math.round(v / 10000).toLocaleString("ko-KR")}만` : v.toLocaleString("ko-KR"); }
+function addMonths(date, months) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
+}
+function formatYearMonth(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+function getGoalLabel(goalType, rawName = "") {
+  const labelMap = {
+    여행: "여행 자금",
+    결혼: "결혼 준비",
+    자동차: "자동차 구매",
+    주택: "주택 마련",
+    대출상환: "대출 상환",
+    교육: "교육비 마련",
+    은퇴준비: "은퇴 준비",
+    기타: "자금 목표",
+  };
+  if (goalType && labelMap[goalType]) return labelMap[goalType];
+  const cleanName = String(rawName || "").replace(/\s+/g, " ").trim();
+  if (cleanName && !cleanName.includes("조건")) return cleanName;
+  return "자금 목표";
+}
 
 const GOAL_TITLES = {
   starter: "전세자금 마련",
@@ -646,15 +705,43 @@ const GOAL_TITLES = {
 };
 
 function getGoalTitle(profileKey = state.profile) {
+  if (profileKey === state.profile) {
+    const active = getActiveGoalEntry();
+    if (active?.title) return active.title;
+  }
   return GOAL_TITLES[profileKey] || "목표";
 }
 
 function syncGoalSelector() {
   const selector = $("goalSelector");
   if (!selector) return;
-  const value = `${state.profile}-goal`;
-  selector.innerHTML = `<option value="${value}">${getGoalTitle()}</option>`;
-  selector.value = value;
+  const options = getGoalOptions();
+  if (!options.some(goal => goal.id === state.activeGoalId)) state.activeGoalId = getDefaultGoalId();
+  selector.innerHTML = options.map(goal =>
+    `<option value="${goal.id}">${goal.title}</option>`
+  ).join("");
+  selector.value = state.activeGoalId;
+}
+
+function getDefaultGoalId(profileKey = state.profile) {
+  return `${profileKey}-default`;
+}
+
+function getGoalOptions() {
+  const base = profiles[state.profile] || profiles.starter;
+  return [
+    {
+      id: getDefaultGoalId(),
+      title: GOAL_TITLES[state.profile] || "기본 목표",
+      goal: base.goal,
+      isDefault: true,
+    },
+    ...state.savedGoals,
+  ];
+}
+
+function getActiveGoalEntry() {
+  return getGoalOptions().find(goal => goal.id === state.activeGoalId) || getGoalOptions()[0];
 }
 
 /** rule-engine assessRisk 호출용 헬퍼 */
@@ -709,6 +796,65 @@ function buildCashflowData(p) {
     date: `${year}-${month}-${t.date.split('.')[1] || '01'}`,
   }));
   return calculateCashflow(txs, 6);
+}
+
+function activateTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === `v-${tab}`));
+  document.querySelectorAll(".nav-btn").forEach(n => n.classList.toggle("active", n.dataset.tab === tab));
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function registerGoal(goal, title) {
+  if (!goal.targetAmount || goal.targetAmount <= 0) {
+    toast("목표 금액을 입력해 주세요.");
+    return;
+  }
+  const savedGoal = {
+    id: `custom-${Date.now()}`,
+    title: title || `${goal.goalType || "기타"} 목표`,
+    createdAt: new Date().toISOString(),
+    goalType: goal.goalType || "기타",
+    goal: {
+      goalType: goal.goalType || "기타",
+      targetAmount: goal.targetAmount,
+      currentAmount: goal.currentAmount || 0,
+      targetDate: goal.targetDate || formatYearMonth(addMonths(new Date(), 36)),
+    },
+  };
+  state.savedGoals.push(savedGoal);
+  state.activeGoalId = savedGoal.id;
+  state.customGoal = {
+    goalType: goal.goalType || "기타",
+    targetAmount: goal.targetAmount,
+    currentAmount: goal.currentAmount || 0,
+    targetDate: goal.targetDate || formatYearMonth(addMonths(new Date(), 36)),
+  };
+  state.customGoalTitle = savedGoal.title;
+  state.consultationBrief = null;
+  state.cashflowStabilityReport = null;
+  saveState();
+  renderAll();
+  activateTab("goal");
+  toast("목표 흐름에 새 목표를 반영했습니다.");
+}
+
+function registerSimpleGoal() {
+  const goalType = $("simGoalType").value || "기타";
+  const targetAmount = (parseInt($("simGoalAmt").value) || 0) * 10000;
+  const currentAmount = (parseInt($("simCurAmt").value) || 0) * 10000;
+  const duration = parseInt($("simDuration").value) || 1;
+  const targetDate = formatYearMonth(addMonths(new Date(), duration));
+  const goalLabel = getGoalLabel(goalType, $("simGoalType").selectedOptions[0]?.textContent || "");
+  registerGoal({ goalType, targetAmount, currentAmount, targetDate }, goalLabel);
+}
+
+function registerDetailGoal() {
+  if (!state.pendingDetailGoal) {
+    toast("먼저 작성하신 목표를 분석해 주세요.");
+    return;
+  }
+  registerGoal(state.pendingDetailGoal, state.pendingDetailGoal.title);
 }
 
 // ── Rendering ──
@@ -984,7 +1130,19 @@ function renderMemory() {
 
 function getMemories() {
   const p    = getProfile();
-  const base = p.memories.filter(m => !state.removedMems.includes(m.id));
+  const activeGoal = getActiveGoalEntry();
+  const isCustomGoal = activeGoal && !activeGoal.isDefault;
+  const customGoalMemory = isCustomGoal ? [{
+    id: "custom-goal",
+    icon: "목",
+    title: `${activeGoal.title || activeGoal.goal.goalType} 목표`,
+    detail: `${activeGoal.goal.targetDate || '날짜 미설정'}까지 ${fmtWon(activeGoal.goal.targetAmount)}`,
+    source: "사용자 등록",
+  }] : [];
+  const base = [
+    ...customGoalMemory,
+    ...p.memories.filter(m => !isCustomGoal || m.id !== "goal"),
+  ].filter(m => !state.removedMems.includes(m.id));
   const ans  = p.questions.map(q => {
     const a = state.answers[q.id];
     const o = q.options.find(x => x.value === a);
@@ -1066,6 +1224,10 @@ function saveState() {
       answers:      state.answers,
       removedMems:  state.removedMems,
       dataCtrl:     state.dataCtrl,
+      customGoal:   state.customGoal,
+      customGoalTitle: state.customGoalTitle,
+      savedGoals:   state.savedGoals,
+      activeGoalId: state.activeGoalId,
     }));
   } catch {}
 }
@@ -1077,6 +1239,19 @@ function loadState() {
     state.profile = "starter";
     state.answers     = s.answers     || {};
     state.removedMems = s.removedMems || [];
+    state.savedGoals = Array.isArray(s.savedGoals) ? s.savedGoals : [];
+    if (!state.savedGoals.length && s.customGoal) {
+      state.savedGoals = [{
+        id: "custom-migrated",
+        title: s.customGoalTitle || `${s.customGoal.goalType || "기타"} 목표`,
+        createdAt: new Date().toISOString(),
+        goalType: s.customGoal.goalType || "기타",
+        goal: s.customGoal,
+      }];
+    }
+    state.activeGoalId = s.activeGoalId || (state.savedGoals.length ? state.savedGoals[state.savedGoals.length - 1].id : getDefaultGoalId());
+    state.customGoal = s.customGoal || state.savedGoals[state.savedGoals.length - 1]?.goal || null;
+    state.customGoalTitle = s.customGoalTitle || state.savedGoals[state.savedGoals.length - 1]?.title || "";
     // 데이터 통제 설정 병합 (기본값 유지)
     if (s.dataCtrl) state.dataCtrl = { ...state.dataCtrl, ...s.dataCtrl };
   } catch {}

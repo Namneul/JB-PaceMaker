@@ -25,9 +25,9 @@ const TIMEOUT_MS = 15_000;
 // ---------------------------------------------------------------------------
 
 export const aiConfig = {
-  provider: 'groq',
-  apiKey: '',
-  model: '',
+  provider: globalThis.JB_AI_CONFIG?.provider || 'groq',
+  apiKey: globalThis.JB_AI_CONFIG?.apiKey || '',
+  model: globalThis.JB_AI_CONFIG?.model || '',
 };
 
 function loadPersistedConfig() {
